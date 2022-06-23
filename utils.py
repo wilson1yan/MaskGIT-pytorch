@@ -1,4 +1,5 @@
 import os
+import glob
 import albumentations
 import numpy as np
 import torch.nn as nn
@@ -15,7 +16,7 @@ class ImagePaths(Dataset):
     def __init__(self, path, size=None):
         self.size = size
 
-        self.images = [os.path.join(path, file) for file in os.listdir(path)]
+        self.images = glob.glob(os.path.join(path, '*', '*.JPEG'))
         self._length = len(self.images)
 
         self.rescaler = albumentations.SmallestMaxSize(max_size=self.size)
