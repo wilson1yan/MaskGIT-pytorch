@@ -24,7 +24,7 @@ class VQGANTransformer(nn.Module):
         self.transformer = BidirectionalTransformer(args)
         self.vqgan = self.load_vqgan(args)
         print(f"Transformer parameters: {sum([p.numel() for p in self.transformer.parameters()])}")
-
+    
     def load_checkpoint(self, epoch):
         self.load_state_dict(torch.load(os.path.join("checkpoints", f"transformer_epoch_{epoch}.pt")))
         print("Check!")
@@ -72,7 +72,9 @@ class VQGANTransformer(nn.Module):
 
         a_indices = torch.cat((sos_tokens, a_indices), dim=1)
 
-        target = torch.cat((sos_tokens, z_indices), dim=1)
+        target = (~mask) * z_indices + mask * masked_indices
+        target = torch.cat((self.mask_token_id, target), dim=1)
+        # target = torch.cat((sos_tokens, z_indices), dim=1)
 
         logits = self.transformer(a_indices)
 

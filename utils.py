@@ -1,18 +1,28 @@
 import os
 import glob
+import random
 import albumentations
 import numpy as np
+import torch
 import torch.nn as nn
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+import torch.utils.data as data
 import matplotlib.pyplot as plt
+
+from dist_ops import get_size, get_rank
 
 
 # --------------------------------------------- #
 #                  Data Utils
 # --------------------------------------------- #
 
-class ImagePaths(Dataset):
+def seed_all(seed):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+
+class ImagePaths(data.Dataset):
     def __init__(self, path, size=None):
         self.size = size
 
@@ -43,7 +53,11 @@ class ImagePaths(Dataset):
 
 def load_data(args):
     train_data = ImagePaths(args.dataset_path, size=256)
-    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=False)
+    sampler = data.distributed.DistributedSampler(
+        train_data, num_replicas=get_size(), rank=get_rank()
+    )
+    train_loader = data.DataLoader(train_data, batch_size=args.batch_size // get_size(),
+                                   num_workers=4, pin_memory=True, sampler=sampler)
     return train_loader
 
 

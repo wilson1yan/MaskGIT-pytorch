@@ -5,16 +5,21 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torchvision import utils as vutils
 from transformer import VQGANTransformer
-from utils import load_data, plot_images
+from utils import load_data, plot_images, seed_all
 from lr_schedule import WarmupLinearLRSchedule
+from dist_ops import is_master_process, DistributedDataParallel
 from torch.utils.tensorboard import SummaryWriter
 
 
 class TrainTransformer:
     def __init__(self, args):
         self.model = VQGANTransformer(args).to(device=args.device)
+        self.model = DistributedDataParallel(self.model, device_ids=[args.rank],
+                                             broadcast_buffers=False, find_unused_parameters=False)
+        
         self.optim = self.configure_optimizers()
         self.lr_schedule = WarmupLinearLRSchedule(
             optimizer=self.optim,
@@ -29,10 +34,12 @@ class TrainTransformer:
         if args.start_from_epoch > 1:
             self.model.load_checkpoint(args.start_from_epoch)
             print(f"Loaded Transformer from epoch {args.start_from_epoch}.")
-        if args.run_name:
-            self.logger = SummaryWriter(f"./runs/{args.run_name}")
-        else:
-            self.logger = SummaryWriter()
+
+        if is_master_process():
+            if args.run_name:
+                self.logger = SummaryWriter(f"./runs/{args.run_name}")
+            else:
+                self.logger = SummaryWriter()
         self.train(args)
 
     def train(self, args):
@@ -40,30 +47,36 @@ class TrainTransformer:
         len_train_dataset = len(train_dataset)
         step = args.start_from_epoch * len_train_dataset
         for epoch in range(args.start_from_epoch+1, args.epochs+1):
-            print(f"Epoch {epoch}:")
-            with tqdm(range(len(train_dataset))) as pbar:
-                self.lr_schedule.step()
-                for i, imgs in zip(pbar, train_dataset):
-                    imgs = imgs.to(device=args.device)
-                    logits, target = self.model(imgs)
-                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1))
-                    loss.backward()
-                    if step % args.accum_grad == 0:
-                        self.optim.step()
-                        self.optim.zero_grad()
-                    step += 1
+            train_dataset.sampler.set_epoch(epoch)
+
+            if is_master_process():
+                print(f"Epoch {epoch}:")
+                pbar = tqdm(list(range(len(train_dataset))))
+            self.lr_schedule.step()
+            for i, imgs in zip(pbar, train_dataset):
+                imgs = imgs.to(device=args.device)
+                logits, target = self.model(imgs)
+                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1), ignore_index=self.model.mask_token_id)
+                loss.backward()
+                if step % args.accum_grad == 0:
+                    self.optim.step()
+                    self.optim.zero_grad()
+                step += 1
+                if is_master_process():
                     pbar.set_postfix(Transformer_Loss=np.round(loss.cpu().detach().numpy().item(), 4))
                     pbar.update(0)
                     self.logger.add_scalar("Cross Entropy Loss", np.round(loss.cpu().detach().numpy().item(), 4), (epoch * len_train_dataset) + i)
-            try:
-                log, sampled_imgs = self.model.log_images(imgs[0:1])
-                vutils.save_image(sampled_imgs.add(1).mul(0.5), os.path.join("results", f"{epoch}.jpg"), nrow=4)
-                plot_images(log)
-            except:
-                pass
-            if epoch % args.ckpt_interval == 0:
-                torch.save(self.model.state_dict(), os.path.join("checkpoints", f"transformer_epoch_{epoch}.pt"))
-            torch.save(self.model.state_dict(), os.path.join("checkpoints", "transformer_current.pt"))
+
+            if is_master_process():
+                try:
+                    log, sampled_imgs = self.model.log_images(imgs[0:1])
+                    vutils.save_image(sampled_imgs.add(1).mul(0.5), os.path.join("results", f"{epoch}.jpg"), nrow=4)
+                    plot_images(log)
+                except:
+                    pass
+                if epoch % args.ckpt_interval == 0:
+                    torch.save(self.model.state_dict(), os.path.join("checkpoints", f"transformer_epoch_{epoch}.pt"))
+                torch.save(self.model.state_dict(), os.path.join("checkpoints", "transformer_current.pt"))
 
     def configure_optimizers(self):
         # decay, no_decay = set(), set()
@@ -123,6 +136,17 @@ if __name__ == '__main__':
     args.run_name = "imagenet_maskgit_pytorch"
 
     args.start_from_epoch = 0
+    args.size = int(os.environ['WORLD_SIZE'])
+    args.rank = int(os.environ['LOCAL_RANK'])
+
+    args.device = torch.device(f'cuda:{args.rank}')    
+    torch.cuda.set_device(args.rank)
+    torch.backends.cudnn.benchmark = True
+
+    seed_all(args.rank)
+
+    dist.init_process_group(backend='nccl', init_mehtod=f'tcp://{os.environ["MASTER_ADDR"]}:{os.environ["MASTER_PORT"]}',
+                            world_size=args.size, rank=args.rank)
 
     train_transformer = TrainTransformer(args)
     
