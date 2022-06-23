@@ -11,6 +11,7 @@ _CONFIDENCE_OF_KNOWN_TOKENS = torch.Tensor([torch.inf]).to("cuda")
 class VQGANTransformer(nn.Module):
     def __init__(self, args):
         super().__init__()
+        self.args = args
         self.num_image_tokens = args.num_image_tokens
         self.sos_token = args.num_codebook_vectors + 1
         self.mask_token_id = args.num_codebook_vectors
@@ -23,10 +24,15 @@ class VQGANTransformer(nn.Module):
         #                         norm_layer=partial(nn.LayerNorm, eps=1e-6), vocab_size=8192+1)
         self.transformer = BidirectionalTransformer(args)
         self.vqgan = self.load_vqgan(args)
+        self.vqgan.eval()
+        for p in self.vqgan.parameters():
+            p.requires_grad = False
+            
+
         print(f"Transformer parameters: {sum([p.numel() for p in self.transformer.parameters()])}")
     
     def load_checkpoint(self, epoch):
-        self.load_state_dict(torch.load(os.path.join("checkpoints", f"transformer_epoch_{epoch}.pt")))
+        self.load_state_dict(torch.load(os.path.join("checkpoints", f"transformer_epoch_{epoch}.pt"), map_location=self.args.device))
         print("Check!")
 
     @staticmethod
@@ -44,6 +50,7 @@ class VQGANTransformer(nn.Module):
         return quant_z, indices
 
     def forward(self, x):
+        self.vqgan.eval()
         # _, z_indices = self.encode_to_z(x)
         #
         # r = np.random.uniform()
@@ -57,26 +64,39 @@ class VQGANTransformer(nn.Module):
         _, z_indices = self.encode_to_z(x)
         sos_tokens = torch.ones(x.shape[0], 1, dtype=torch.long, device=z_indices.device) * self.sos_token
 
-        r = math.floor(self.gamma(np.random.uniform()) * z_indices.shape[1])
-        sample = torch.rand(z_indices.shape, device=z_indices.device).topk(r, dim=1).indices
-        mask = torch.zeros(z_indices.shape, dtype=torch.bool, device=z_indices.device)
-        mask.scatter_(dim=1, index=sample, value=True)
+#        ratio = math.ceil(self.gamma(np.random.uniform()) * z_indices.shape[1])
+        ratio = self.gamma(torch.rand(x.shape[0], dtype=torch.float32, device=x.device))
+        ratio = torch.clamp(ratio, 1e-6, 1)
+        ratio = torch.ceil(ratio * z_indices.shape[1])
+
+        sample = torch.stack([torch.randperm(z_indices.shape[1], device=x.device) for _ in range(x.shape[0])])
+        mask = sample < ratio[:, None]
+
+#        sample = torch.rand(z_indices.shape, device=z_indices.device).topk(r, dim=1).indices
+#        mask = torch.zeros(z_indices.shape, dtype=torch.bool, device=z_indices.device)
+#        mask.scatter_(dim=1, index=sample, value=True)
 
         # torch.rand(z_indices.shape, device=z_indices.device)
         # mask = torch.bernoulli(r * torch.ones(z_indices.shape, device=z_indices.device))
         # mask = torch.bernoulli(torch.rand(z_indices.shape, device=z_indices.device))
         # mask = mask.round().to(dtype=torch.int64)
         # masked_indices = torch.zeros_like(z_indices)
-        masked_indices = self.mask_token_id * torch.ones_like(z_indices, device=z_indices.device)
-        a_indices = mask * z_indices + (~mask) * masked_indices
+ #       masked_indices = self.mask_token_id * torch.ones_like(z_indices, device=z_indices.device)
+#        a_indices = (~mask) * z_indices + mask * masked_indices
 
+#        a_indices = torch.cat((sos_tokens, a_indices), dim=1)
+
+        a_indices = torch.where(mask, self.mask_token_id, z_indices)
         a_indices = torch.cat((sos_tokens, a_indices), dim=1)
 
-        target = (~mask) * z_indices + mask * masked_indices
-        target = torch.cat((self.mask_token_id, target), dim=1)
-        # target = torch.cat((sos_tokens, z_indices), dim=1)
+        #target = mask * z_indices + (~mask) * masked_indices
+        #target = torch.cat((torch.ones(x.shape[0], 1, dtype=torch.long, device=z_indices.device) * self.mask_token_id, target), dim=1)
+        #target = torch.cat((sos_tokens, z_indices), dim=1)
 
-        logits = self.transformer(a_indices)
+        logits = self.transformer(a_indices)[:, 1:, :self.args.num_codebook_vectors]
+        loss = F.cross_entropy(logits.permute(0, 2, 1), z_indices, reduction='none')
+        loss = (loss * mask).sum() / mask.sum()
+        return loss
 
         return logits, target
 
@@ -93,7 +113,7 @@ class VQGANTransformer(nn.Module):
         if mode == "linear":
             return lambda r: 1 - r
         elif mode == "cosine":
-            return lambda r: np.cos(r * np.pi / 2)
+            return lambda r: torch.cos(r * np.pi / 2)
         elif mode == "square":
             return lambda r: 1 - r ** 2
         elif mode == "cubic":

@@ -21,15 +21,15 @@ class TrainTransformer:
                                              broadcast_buffers=False, find_unused_parameters=False)
         
         self.optim = self.configure_optimizers()
-        self.lr_schedule = WarmupLinearLRSchedule(
-            optimizer=self.optim,
-            init_lr=1e-6,
-            peak_lr=args.learning_rate,
-            end_lr=0.,
-            warmup_epochs=10,
-            epochs=args.epochs,
-            current_step=args.start_from_epoch
-        )
+        #self.lr_schedule = WarmupLinearLRSchedule(
+        #    optimizer=self.optim,
+        #    init_lr=1e-6,
+        #    peak_lr=args.learning_rate,
+        #    end_lr=0.,
+        #    warmup_epochs=10,
+        #    epochs=args.epochs,
+        #    current_step=args.start_from_epoch
+        #)
 
         if args.start_from_epoch > 1:
             self.model.load_checkpoint(args.start_from_epoch)
@@ -46,28 +46,42 @@ class TrainTransformer:
         train_dataset = load_data(args)
         len_train_dataset = len(train_dataset)
         step = args.start_from_epoch * len_train_dataset
+
         for epoch in range(args.start_from_epoch+1, args.epochs+1):
             train_dataset.sampler.set_epoch(epoch)
+            self.model.train()
 
             if is_master_process():
                 print(f"Epoch {epoch}:")
                 pbar = tqdm(list(range(len(train_dataset))))
-            self.lr_schedule.step()
-            for i, imgs in zip(pbar, train_dataset):
+            #self.lr_schedule.step()
+
+            total_loss, count = 0, 0
+            for i, imgs in enumerate(train_dataset):
                 imgs = imgs.to(device=args.device)
-                logits, target = self.model(imgs)
-                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1), ignore_index=self.model.mask_token_id)
+                #logits, target = self.model(imgs)
+                #loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target.reshape(-1), ignore_index=self.model.mask_token_id)
+                loss = self.model(imgs)
                 loss.backward()
-                if step % args.accum_grad == 0:
-                    self.optim.step()
-                    self.optim.zero_grad()
+
+                #if step % args.accum_grad == 0:
+                self.optim.step()
+                self.optim.zero_grad()
+
+                total_loss += loss.item() * imgs.shape[0]
+                count += imgs.shape[0]
+
                 step += 1
                 if is_master_process():
                     pbar.set_postfix(Transformer_Loss=np.round(loss.cpu().detach().numpy().item(), 4))
-                    pbar.update(0)
+                    pbar.update(1)
                     self.logger.add_scalar("Cross Entropy Loss", np.round(loss.cpu().detach().numpy().item(), 4), (epoch * len_train_dataset) + i)
 
+                if is_master_process():
+                    print('Loss', total_loss / count, self.optim.param_groups[0]['lr'])
+
             if is_master_process():
+                self.model.eval()
                 try:
                     log, sampled_imgs = self.model.log_images(imgs[0:1])
                     vutils.save_image(sampled_imgs.add(1).mul(0.5), os.path.join("results", f"{epoch}.jpg"), nrow=4)
@@ -103,7 +117,7 @@ class TrainTransformer:
         #     {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": 4.5e-2},
         #     {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
         # ]
-        optimizer = torch.optim.Adam(self.model.transformer.parameters(), lr=1e-4, betas=(0.9, 0.96), weight_decay=4.5e-2)
+        optimizer = torch.optim.Adam(self.model.transformer.parameters(), lr=1e-4, betas=(0.9, 0.96))#, weight_decay=4.5e-2)
         return optimizer
 
 
@@ -118,8 +132,8 @@ if __name__ == '__main__':
     parser.add_argument('--dataset-path', type=str, default='/home/wilson/data/imagenet/train', help='Path to data.')
     parser.add_argument('--checkpoint-path', type=str, default='/home/wilson/logs/vqgan_imagenet_f16_1024/ckpts/last.ckpt', help='Path to checkpoint.')
     parser.add_argument('--device', type=str, default="cuda", help='Which device the training is on.')
-    parser.add_argument('--batch-size', type=int, default=64, help='Batch size for training.')
-    parser.add_argument('--accum-grad', type=int, default=4, help='Number for gradient accumulation.')
+    parser.add_argument('--batch-size', type=int, default=128, help='Batch size for training.')
+    parser.add_argument('--accum-grad', type=int, default=2, help='Number for gradient accumulation.')
     parser.add_argument('--epochs', type=int, default=300, help='Number of epochs to train.')
     parser.add_argument('--start-from-epoch', type=int, default=1, help='Number of epochs to train.')
     parser.add_argument('--ckpt-interval', type=int, default=100, help='Number of epochs to train.')
@@ -145,7 +159,7 @@ if __name__ == '__main__':
 
     seed_all(args.rank)
 
-    dist.init_process_group(backend='nccl', init_mehtod=f'tcp://{os.environ["MASTER_ADDR"]}:{os.environ["MASTER_PORT"]}',
+    dist.init_process_group(backend='nccl', init_method=f'tcp://{os.environ["MASTER_ADDR"]}:{os.environ["MASTER_PORT"]}',
                             world_size=args.size, rank=args.rank)
 
     train_transformer = TrainTransformer(args)
