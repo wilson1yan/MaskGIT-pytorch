@@ -103,7 +103,7 @@ if __name__ == '__main__':
     parser.add_argument('--beta', type=float, default=0.25, help='Commitment loss scalar.')
     parser.add_argument('--image-channels', type=int, default=3, help='Number of channels of images.')
     parser.add_argument('--dataset-path', type=str, default='/home/wilson/data/imagenet/train', help='Path to data.')
-    parser.add_argument('--checkpoint-path', type=str, default='/home/wilson/logs/vqgan_1024/checkpoints/last_ckpt.pt', help='Path to checkpoint.')
+    parser.add_argument('--checkpoint-path', type=str, default='/home/wilson/logs/vqgan_imagenet_f16_1024/ckpts/last.ckpt', help='Path to checkpoint.')
     parser.add_argument('--device', type=str, default="cuda", help='Which device the training is on.')
     parser.add_argument('--batch-size', type=int, default=64, help='Batch size for training.')
     parser.add_argument('--accum-grad', type=int, default=4, help='Number for gradient accumulation.')
